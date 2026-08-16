@@ -173,6 +173,26 @@ pub struct WebContext {
 }
 
 pub type WebContextStore = Arc<Mutex<HashMap<Option<PathBuf>, WebContext>>>;
+
+#[cfg(any(
+  test,
+  target_os = "linux",
+  target_os = "dragonfly",
+  target_os = "freebsd",
+  target_os = "netbsd",
+  target_os = "openbsd"
+))]
+fn should_register_custom_protocol(
+  registered_custom_protocols: &mut HashSet<String>,
+  scheme: &str,
+  incognito: bool,
+) -> bool {
+  // Wry creates a fresh ephemeral WebContext for every incognito webview on
+  // WebKitGTK. Protocols registered on the shared context therefore do not
+  // apply to it and must be forwarded to Wry for each incognito webview.
+  incognito || registered_custom_protocols.insert(scheme.to_string())
+}
+
 // window
 pub type WindowEventHandler = Box<dyn Fn(&WindowEvent) + Send>;
 pub type WindowEventListeners = Arc<Mutex<HashMap<WindowEventId, WindowEventHandler>>>;
@@ -4971,13 +4991,13 @@ You may have it installed on another user account, but it is not available for t
       target_os = "openbsd"
     ))]
     {
-      if web_context.registered_custom_protocols.contains(&scheme) {
+      if !should_register_custom_protocol(
+        &mut web_context.registered_custom_protocols,
+        &scheme,
+        webview_attributes.incognito,
+      ) {
         continue;
       }
-
-      web_context
-        .registered_custom_protocols
-        .insert(scheme.clone());
     }
 
     webview_builder = webview_builder.with_asynchronous_custom_protocol(
@@ -5224,5 +5244,38 @@ fn to_tao_theme(theme: Option<Theme>) -> Option<TaoTheme> {
     Some(Theme::Light) => Some(TaoTheme::Light),
     Some(Theme::Dark) => Some(TaoTheme::Dark),
     _ => None,
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::should_register_custom_protocol;
+  use std::collections::HashSet;
+
+  #[test]
+  fn incognito_webviews_register_protocols_on_their_ephemeral_context() {
+    let mut registered = HashSet::new();
+
+    assert!(should_register_custom_protocol(
+      &mut registered,
+      "app",
+      false
+    ));
+    assert!(!should_register_custom_protocol(
+      &mut registered,
+      "app",
+      false
+    ));
+
+    assert!(should_register_custom_protocol(
+      &mut registered,
+      "app",
+      true
+    ));
+    assert!(should_register_custom_protocol(
+      &mut registered,
+      "app",
+      true
+    ));
   }
 }

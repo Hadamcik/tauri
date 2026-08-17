@@ -13,6 +13,14 @@
 )]
 
 use self::monitor::MonitorExt;
+#[cfg(any(
+  target_os = "linux",
+  target_os = "dragonfly",
+  target_os = "freebsd",
+  target_os = "netbsd",
+  target_os = "openbsd"
+))]
+use gtk::prelude::*;
 use http::Request;
 #[cfg(target_os = "macos")]
 use objc2::ClassType;
@@ -173,6 +181,26 @@ pub struct WebContext {
 }
 
 pub type WebContextStore = Arc<Mutex<HashMap<Option<PathBuf>, WebContext>>>;
+
+#[cfg(any(
+  test,
+  target_os = "linux",
+  target_os = "dragonfly",
+  target_os = "freebsd",
+  target_os = "netbsd",
+  target_os = "openbsd"
+))]
+fn should_register_custom_protocol(
+  registered_custom_protocols: &mut HashSet<String>,
+  scheme: &str,
+  incognito: bool,
+) -> bool {
+  // Wry creates a fresh ephemeral WebContext for every incognito webview on
+  // WebKitGTK. Protocols registered on the shared context therefore do not
+  // apply to it and must be forwarded to Wry for each incognito webview.
+  incognito || registered_custom_protocols.insert(scheme.to_string())
+}
+
 // window
 pub type WindowEventHandler = Box<dyn Fn(&WindowEvent) + Send>;
 pub type WindowEventListeners = Arc<Mutex<HashMap<WindowEventId, WindowEventHandler>>>;
@@ -382,6 +410,14 @@ impl<T: UserEvent> Context<T> {
           create_webview(
             WebviewKind::WindowChild,
             window,
+            #[cfg(any(
+              target_os = "linux",
+              target_os = "dragonfly",
+              target_os = "freebsd",
+              target_os = "netbsd",
+              target_os = "openbsd"
+            ))]
+            &options.content_fixed,
             window_id_wrapper_,
             webview_id,
             &context,
@@ -1477,6 +1513,14 @@ pub type CreateWebviewClosure =
 
 pub struct CreateWebviewOptions {
   pub focused_webview: Arc<Mutex<Option<String>>>,
+  #[cfg(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+  ))]
+  pub content_fixed: gtk::Fixed,
 }
 
 pub enum Message<T: 'static> {
@@ -2422,6 +2466,89 @@ pub struct WebviewWrapper {
   // the key of the WebContext if it's not shared
   context_key: Option<PathBuf>,
   bounds: Arc<Mutex<Option<WebviewBounds>>>,
+  #[cfg(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+  ))]
+  current_bounds: CurrentWebviewBounds,
+  #[cfg(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+  ))]
+  content_fixed: gtk::Fixed,
+}
+
+#[cfg(any(
+  test,
+  target_os = "linux",
+  target_os = "dragonfly",
+  target_os = "freebsd",
+  target_os = "netbsd",
+  target_os = "openbsd"
+))]
+#[derive(Clone)]
+struct CurrentWebviewBounds(Arc<Mutex<wry::Rect>>);
+
+#[cfg(any(
+  test,
+  target_os = "linux",
+  target_os = "dragonfly",
+  target_os = "freebsd",
+  target_os = "netbsd",
+  target_os = "openbsd"
+))]
+impl CurrentWebviewBounds {
+  fn new(bounds: wry::Rect) -> Self {
+    Self(Arc::new(Mutex::new(bounds)))
+  }
+
+  fn get(&self) -> wry::Rect {
+    *self.0.lock().unwrap()
+  }
+
+  fn set(&self, bounds: wry::Rect) {
+    *self.0.lock().unwrap() = bounds;
+  }
+}
+
+#[cfg(any(
+  target_os = "linux",
+  target_os = "dragonfly",
+  target_os = "freebsd",
+  target_os = "netbsd",
+  target_os = "openbsd"
+))]
+impl WebviewWrapper {
+  fn bounds(&self) -> wry::Result<wry::Rect> {
+    Ok(self.current_bounds.get())
+  }
+
+  fn set_bounds(&self, bounds: wry::Rect) -> wry::Result<()> {
+    self.inner.set_bounds(bounds)?;
+
+    // WebKitGTK stores a GtkFixed child's position on its parent. A bare
+    // size_allocate is transient and is lost on the next GTK relayout, so
+    // persist both position and size explicitly. This is the behavior from
+    // tauri-apps/wry#1745, backported here while Sage remains on wry 0.54.
+    let webview = self.inner.webview();
+    let scale_factor = webview.scale_factor() as f64;
+    let (width, height) = bounds.size.to_logical::<i32>(scale_factor).into();
+    let (x, y) = bounds.position.to_logical::<i32>(scale_factor).into();
+
+    self.content_fixed.move_(&webview, x, y);
+    webview.set_size_request(width, height);
+    webview.size_allocate(&gtk::Allocation::new(x, y, width, height));
+
+    self.current_bounds.set(bounds);
+
+    Ok(())
+  }
 }
 
 impl Deref for WebviewWrapper {
@@ -2475,12 +2602,34 @@ pub struct WindowWrapper {
   is_window_transparent: bool,
   #[cfg(windows)]
   surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
+  #[cfg(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+  ))]
+  content_fixed: gtk::Fixed,
   focused_webview: Arc<Mutex<Option<String>>>,
 }
 
 impl WindowWrapper {
   pub fn label(&self) -> &str {
     &self.label
+  }
+
+  fn create_webview_options(&self) -> CreateWebviewOptions {
+    CreateWebviewOptions {
+      focused_webview: self.focused_webview.clone(),
+      #[cfg(any(
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+      ))]
+      content_fixed: self.content_fixed.clone(),
+    }
   }
 }
 
@@ -2943,8 +3092,8 @@ impl<T: UserEvent> Runtime<T> for Wry<T> {
       .0
       .borrow()
       .get(&window_id)
-      .map(|w| (w.inner.clone(), w.focused_webview.clone()));
-    if let Some((Some(window), focused_webview)) = window {
+      .map(|w| (w.inner.clone(), w.create_webview_options()));
+    if let Some((Some(window), options)) = window {
       let window_id_wrapper = Arc::new(Mutex::new(window_id));
 
       let webview_id = self.context.next_webview_id();
@@ -2952,11 +3101,19 @@ impl<T: UserEvent> Runtime<T> for Wry<T> {
       let webview = create_webview(
         WebviewKind::WindowChild,
         &window,
+        #[cfg(any(
+          target_os = "linux",
+          target_os = "dragonfly",
+          target_os = "freebsd",
+          target_os = "netbsd",
+          target_os = "openbsd"
+        ))]
+        &options.content_fixed,
         window_id_wrapper.clone(),
         webview_id,
         &self.context,
         pending,
-        focused_webview,
+        options.focused_webview,
       )?;
 
       #[allow(unknown_lints, clippy::manual_inspect)]
@@ -3563,13 +3720,25 @@ fn handle_user_message<T: UserEvent>(
             .map(|webview_index| w.webviews.remove(webview_index))
         });
 
-        if let Some(webview) = webview_handle {
-          if let Some((Some(new_parent_window), new_parent_window_webviews)) = windows
-            .0
-            .borrow_mut()
-            .get_mut(&new_parent_window_id)
-            .map(|w| (w.inner.clone(), &mut w.webviews))
+        #[allow(unused_mut)]
+        if let Some(mut webview) = webview_handle {
+          if let Some(new_parent_window_wrapper) =
+            windows.0.borrow_mut().get_mut(&new_parent_window_id)
           {
+            #[allow(unused_variables)]
+            let Some(new_parent_window) = new_parent_window_wrapper.inner.clone() else {
+              tx.send(Err(Error::FailedToSendMessage)).unwrap();
+              return;
+            };
+            #[cfg(any(
+              target_os = "linux",
+              target_os = "dragonfly",
+              target_os = "freebsd",
+              target_os = "netbsd",
+              target_os = "openbsd"
+            ))]
+            let new_parent_content_fixed = new_parent_window_wrapper.content_fixed.clone();
+
             #[cfg(target_os = "macos")]
             let reparent_result = {
               use wry::WebViewExtMacOS;
@@ -3585,17 +3754,21 @@ fn handle_user_message<T: UserEvent>(
               target_os = "netbsd",
               target_os = "openbsd"
             ))]
-            let reparent_result = {
-              if let Some(container) = new_parent_window.default_vbox() {
-                webview.inner.reparent(container)
-              } else {
-                Err(wry::Error::MessageSender)
-              }
-            };
+            let reparent_result = { webview.inner.reparent(&new_parent_content_fixed) };
 
             match reparent_result {
               Ok(_) => {
-                new_parent_window_webviews.push(webview);
+                #[cfg(any(
+                  target_os = "linux",
+                  target_os = "dragonfly",
+                  target_os = "freebsd",
+                  target_os = "netbsd",
+                  target_os = "openbsd"
+                ))]
+                {
+                  webview.content_fixed = new_parent_content_fixed;
+                }
+                new_parent_window_wrapper.webviews.push(webview);
                 tx.send(Ok(())).unwrap();
               }
               Err(e) => {
@@ -3914,9 +4087,9 @@ fn handle_user_message<T: UserEvent>(
         .0
         .borrow()
         .get(&window_id)
-        .map(|w| (w.inner.clone(), w.focused_webview.clone()));
-      if let Some((Some(window), focused_webview)) = window {
-        match handler(&window, CreateWebviewOptions { focused_webview }) {
+        .map(|w| (w.inner.clone(), w.create_webview_options()));
+      if let Some((Some(window), options)) = window {
+        match handler(&window, options) {
           Ok(webview) => {
             #[allow(unknown_lints, clippy::manual_inspect)]
             windows.0.borrow_mut().get_mut(&window_id).map(|w| {
@@ -3954,6 +4127,15 @@ fn handle_user_message<T: UserEvent>(
       if let Ok(window) = builder.build(event_loop) {
         window_id_map.insert(window.id(), window_id);
 
+        #[cfg(any(
+          target_os = "linux",
+          target_os = "dragonfly",
+          target_os = "freebsd",
+          target_os = "netbsd",
+          target_os = "openbsd"
+        ))]
+        let content_fixed = create_content_fixed(&window);
+
         let window = Arc::new(window);
 
         #[cfg(windows)]
@@ -3986,6 +4168,14 @@ fn handle_user_message<T: UserEvent>(
             is_window_transparent,
             #[cfg(windows)]
             surface,
+            #[cfg(any(
+              target_os = "linux",
+              target_os = "dragonfly",
+              target_os = "freebsd",
+              target_os = "netbsd",
+              target_os = "openbsd"
+            ))]
+            content_fixed,
             focused_webview: Default::default(),
           },
         );
@@ -4315,6 +4505,41 @@ fn parse_proxy_url(url: &Url) -> Result<ProxyConfig> {
   }
 }
 
+#[cfg(any(
+  target_os = "linux",
+  target_os = "dragonfly",
+  target_os = "freebsd",
+  target_os = "netbsd",
+  target_os = "openbsd"
+))]
+fn create_content_fixed(window: &Window) -> gtk::Fixed {
+  let gtk_window = window.gtk_window();
+  let default_vbox = window
+    .default_vbox()
+    .expect("tauri windows must have a default GtkBox")
+    .clone();
+
+  // Keep Tao's default box as the main content layer and add a full-window
+  // fixed overlay for positioned child webviews. This mirrors the architecture
+  // proposed in tauri-apps/tao#1232 without requiring Sage to replace Tao.
+  gtk_window.remove(&default_vbox);
+
+  let overlay = gtk::Overlay::new();
+  gtk_window.add(&overlay);
+  overlay.add(&default_vbox);
+
+  let content_fixed = gtk::Fixed::new();
+  content_fixed.set_halign(gtk::Align::Fill);
+  content_fixed.set_valign(gtk::Align::Fill);
+  overlay.add_overlay(&content_fixed);
+  overlay.set_overlay_pass_through(&content_fixed, true);
+
+  overlay.show();
+  content_fixed.show();
+
+  content_fixed
+}
+
 fn create_window<T: UserEvent, F: Fn(RawWindow) + Send + 'static>(
   window_id: WindowId,
   webview_id: u32,
@@ -4441,6 +4666,15 @@ fn create_window<T: UserEvent, F: Fn(RawWindow) + Send + 'static>(
     .build(event_loop)
     .map_err(|_| Error::CreateWindow)?;
 
+  #[cfg(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+  ))]
+  let content_fixed = create_content_fixed(&window);
+
   #[cfg(feature = "tracing")]
   {
     drop(window_create_span);
@@ -4494,6 +4728,14 @@ fn create_window<T: UserEvent, F: Fn(RawWindow) + Send + 'static>(
       #[cfg(not(feature = "unstable"))]
       WebviewKind::WindowContent,
       &window,
+      #[cfg(any(
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+      ))]
+      &content_fixed,
       Arc::new(Mutex::new(window_id)),
       webview_id,
       context,
@@ -4532,6 +4774,14 @@ fn create_window<T: UserEvent, F: Fn(RawWindow) + Send + 'static>(
     is_window_transparent,
     #[cfg(windows)]
     surface,
+    #[cfg(any(
+      target_os = "linux",
+      target_os = "dragonfly",
+      target_os = "freebsd",
+      target_os = "netbsd",
+      target_os = "openbsd"
+    ))]
+    content_fixed,
     focused_webview,
   })
 }
@@ -4553,9 +4803,18 @@ struct WebviewBounds {
   height_rate: f32,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_webview<T: UserEvent>(
   kind: WebviewKind,
   window: &Window,
+  #[cfg(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+  ))]
+  content_fixed: &gtk::Fixed,
   window_id: Arc<Mutex<WindowId>>,
   id: WebviewId,
   context: &Context<T>,
@@ -4621,7 +4880,28 @@ You may have it installed on another user account, but it is not available for t
     }
   };
 
-  let mut webview_builder = WebViewBuilder::new_with_web_context(&mut web_context.inner)
+  #[cfg(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+  ))]
+  let webview_builder = if webview_attributes.incognito {
+    WebViewBuilder::new()
+  } else {
+    WebViewBuilder::new_with_web_context(&mut web_context.inner)
+  };
+  #[cfg(not(any(
+    target_os = "linux",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd"
+  )))]
+  let webview_builder = WebViewBuilder::new_with_web_context(&mut web_context.inner);
+
+  let mut webview_builder = webview_builder
     .with_id(&label)
     .with_focused(webview_attributes.focus)
     .with_transparent(webview_attributes.transparent)
@@ -4971,13 +5251,13 @@ You may have it installed on another user account, but it is not available for t
       target_os = "openbsd"
     ))]
     {
-      if web_context.registered_custom_protocols.contains(&scheme) {
+      if !should_register_custom_protocol(
+        &mut web_context.registered_custom_protocols,
+        &scheme,
+        webview_attributes.incognito,
+      ) {
         continue;
       }
-
-      web_context
-        .registered_custom_protocols
-        .insert(scheme.clone());
     }
 
     webview_builder = webview_builder.with_asynchronous_custom_protocol(
@@ -5017,11 +5297,7 @@ You may have it installed on another user account, but it is not available for t
       target_os = "ios",
       target_os = "android"
     )))]
-    WebviewKind::WindowChild => {
-      // only way to account for menu bar height, and also works for multiwebviews :)
-      let vbox = window.default_vbox().unwrap();
-      webview_builder.build_gtk(vbox)
-    }
+    WebviewKind::WindowChild => webview_builder.build_gtk(content_fixed),
     #[cfg(any(
       target_os = "windows",
       target_os = "macos",
@@ -5162,6 +5438,31 @@ You may have it installed on another user account, but it is not available for t
       web_context_key
     },
     bounds: Arc::new(Mutex::new(webview_bounds)),
+    #[cfg(any(
+      target_os = "linux",
+      target_os = "dragonfly",
+      target_os = "freebsd",
+      target_os = "netbsd",
+      target_os = "openbsd"
+    ))]
+    current_bounds: CurrentWebviewBounds::new(
+      webview_attributes
+        .bounds
+        .map(RectWrapper::from)
+        .map(|bounds| bounds.0)
+        .unwrap_or_else(|| wry::Rect {
+          position: LogicalPosition::new(0, 0).into(),
+          size: window.inner_size().into(),
+        }),
+    ),
+    #[cfg(any(
+      target_os = "linux",
+      target_os = "dragonfly",
+      target_os = "freebsd",
+      target_os = "netbsd",
+      target_os = "openbsd"
+    ))]
+    content_fixed: content_fixed.clone(),
   })
 }
 
@@ -5224,5 +5525,61 @@ fn to_tao_theme(theme: Option<Theme>) -> Option<TaoTheme> {
     Some(Theme::Light) => Some(TaoTheme::Light),
     Some(Theme::Dark) => Some(TaoTheme::Dark),
     _ => None,
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{should_register_custom_protocol, CurrentWebviewBounds};
+  use std::collections::HashSet;
+  use wry::{dpi::LogicalSize, Rect};
+
+  use tauri_runtime::dpi::LogicalPosition;
+
+  #[test]
+  fn incognito_webviews_register_protocols_on_their_ephemeral_context() {
+    let mut registered = HashSet::new();
+
+    assert!(should_register_custom_protocol(
+      &mut registered,
+      "app",
+      false
+    ));
+    assert!(!should_register_custom_protocol(
+      &mut registered,
+      "app",
+      false
+    ));
+
+    assert!(should_register_custom_protocol(
+      &mut registered,
+      "app",
+      true
+    ));
+    assert!(should_register_custom_protocol(
+      &mut registered,
+      "app",
+      true
+    ));
+  }
+
+  #[test]
+  fn tracked_bounds_preserve_position_when_size_changes() {
+    let bounds = CurrentWebviewBounds::new(Rect {
+      position: LogicalPosition::new(0, 0).into(),
+      size: LogicalSize::new(1, 1).into(),
+    });
+
+    let mut moved = bounds.get();
+    moved.position = LogicalPosition::new(240, 160).into();
+    bounds.set(moved);
+
+    let mut resized = bounds.get();
+    resized.size = LogicalSize::new(640, 480).into();
+    bounds.set(resized);
+
+    let actual = bounds.get();
+    assert_eq!(actual.position, LogicalPosition::new(240, 160).into());
+    assert_eq!(actual.size, LogicalSize::new(640, 480).into());
   }
 }
